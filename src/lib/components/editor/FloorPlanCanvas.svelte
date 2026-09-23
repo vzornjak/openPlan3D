@@ -848,6 +848,63 @@
     _drawSnapPoints(getCS(), currentFloor, showGrid);
   }
 
+  /** AutoCAD-style crosshair at the active input point. Always shows the
+   *  current pointer/finger position with small tick marks, and — when a
+   *  magnetic snap target (wall endpoint or wall edge) is within range —
+   *  a highlighted ring around that exact point, echoing the little
+   *  magnet-snap markers CAD tools use to confirm "this is where it will
+   *  actually land". Mouse and Apple Pencil sit exactly on the physical
+   *  point; a finger's point is already lifted above the fingertip by
+   *  liftTouchPoint() before it ever reaches mousePos, so this function
+   *  itself never needs to know which device is active — it just draws at
+   *  mousePos. */
+  function drawCrosshair() {
+    if (!crosshairVisible || !currentFloor) return;
+    // Snap preview: while drawing a wall, mirror the exact point the wall
+    // will end at (angle snap included); otherwise show plain magnetic
+    // snap so endpoints/edges light up even outside wall-drawing.
+    const snapped = (currentTool === 'wall' && wallStart)
+      ? snapWallEndPoint(mousePos)
+      : magneticSnap(mousePos);
+    const isMagnetic = !!(snapped.snappedToEndpoint || snapped.snappedToWall);
+    const sp = worldToScreen(snapped.x, snapped.y);
+
+    ctx.save();
+    const armLen = 11;
+    const gap = 4;
+    const color = isMagnetic ? '#22c55e' : '#3b82f6';
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(sp.x - armLen - gap, sp.y); ctx.lineTo(sp.x - gap, sp.y);
+    ctx.moveTo(sp.x + gap, sp.y); ctx.lineTo(sp.x + gap + armLen, sp.y);
+    ctx.moveTo(sp.x, sp.y - armLen - gap); ctx.lineTo(sp.x, sp.y - gap);
+    ctx.moveTo(sp.x, sp.y + gap); ctx.lineTo(sp.x, sp.y + gap + armLen);
+    ctx.stroke();
+
+    if (isMagnetic) {
+      // Magnet ring — filled dot at the exact snap target plus a halo,
+      // matching the small-magnet look requested for endpoints/edges.
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 5, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 2, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    } else {
+      // Small centre dot so the crosshair still reads as a precise point
+      // even with nothing to magnetise to.
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 1.5, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   function drawRooms() {
     if (!currentFloor) return;
     _drawRooms(getCS(), currentFloor, detectedRooms, currentSelectedRoomId, showRoomLabels, showDimensions, dimSettings, roomPolygons);
@@ -1756,6 +1813,8 @@
     // Mini-map
     drawMinimap();
 
+    // Crosshair (drawn absolute last — always on top of every other layer)
+    drawCrosshair();
   }
 
   /** True while the integrated elevation view covers the canvas area */
@@ -3202,6 +3261,18 @@
   // because we must preventDefault to stop scrolling and the browser's
   // compatibility mouse events (which would double-fire the handlers).
   let pinchState: { dist: number; cx: number; cy: number } | null = null;
+  // AutoCAD-style crosshair: which input device drove the last pointer
+  // position, so touch gets a finger-clearance offset while mouse/pen stay
+  // exactly under the physical point (a stylus tip is precise; a fingertip
+  // covers the point it is touching).
+  let lastPointerKind: 'mouse' | 'touch' | 'pen' = $state('mouse');
+  /** Whether to draw the crosshair this frame — true once a mouse is over
+   *  the canvas or a touch/pen is actively down; false once the pointer
+   *  leaves so it doesn't linger at a stale position. */
+  let crosshairVisible = $state(false);
+  // How far above a finger's contact point the crosshair is drawn, in CSS
+  // pixels, so the fingertip never covers the thing being placed/snapped.
+  const TOUCH_CROSSHAIR_LIFT = 56;
   let singleTouchActive = false;
   let singleTouchOrigin: { clientX: number; clientY: number } | null = null;
   let singleTouchMoved = false;
@@ -3209,10 +3280,32 @@
   let lastTapX = 0;
   let lastTapY = 0;
 
+  /** Classify the input device driving canvas pointer events (mouse vs pen
+   *  vs touch) before mousedown/touchstart fire, purely for crosshair
+   *  behaviour — does not affect selection/drawing logic. */
+  function onCanvasPointerDown(e: PointerEvent) {
+    lastPointerKind = e.pointerType === 'pen' ? 'pen' : e.pointerType === 'touch' ? 'touch' : 'mouse';
+  }
+  function onCanvasPointerMove(e: PointerEvent) {
+    lastPointerKind = e.pointerType === 'pen' ? 'pen' : e.pointerType === 'touch' ? 'touch' : 'mouse';
+  }
+
+  /** Finger touches report the contact centroid, which a fingertip then
+   *  hides. Lift the reported point straight up (screen space) before it
+   *  becomes a world position, so the crosshair — and everything it
+   *  drives, snapping included — sits in the clear space above the finger.
+   *  Mouse and Apple Pencil are precise pointing devices and pass through
+   *  unchanged. */
+  function liftTouchPoint(clientX: number, clientY: number): { clientX: number; clientY: number } {
+    if (lastPointerKind !== 'touch') return { clientX, clientY };
+    return { clientX, clientY: clientY - TOUCH_CROSSHAIR_LIFT };
+  }
+
   function dispatchMouse(type: 'mousedown' | 'mousemove' | 'mouseup' | 'click' | 'dblclick', clientX: number, clientY: number) {
+    const lifted = liftTouchPoint(clientX, clientY);
     canvas.dispatchEvent(new MouseEvent(type, {
-      clientX,
-      clientY,
+      clientX: lifted.clientX,
+      clientY: lifted.clientY,
       button: 0,
       buttons: type === 'mousedown' || type === 'mousemove' ? 1 : 0,
       bubbles: true,
@@ -3226,6 +3319,7 @@
       singleTouchActive = true;
       singleTouchOrigin = { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY };
       singleTouchMoved = false;
+      crosshairVisible = true;
       dispatchMouse('mousedown', e.touches[0].clientX, e.touches[0].clientY);
     } else if (e.touches.length === 2) {
       lastTapTime = 0;
@@ -3274,6 +3368,7 @@
 
   function onTouchEnd(e: TouchEvent) {
     e.preventDefault();
+    crosshairVisible = false;
     if (e.type === 'touchcancel') {
       pinchState = null;
       lastTapTime = 0;
@@ -3939,6 +4034,10 @@
     tabindex="0"
     aria-label={$t('canvas.editorLabel')}
     style="cursor: {cursorStyle}"
+    onpointerdown={onCanvasPointerDown}
+    onpointermove={onCanvasPointerMove}
+    onmouseenter={() => { if (lastPointerKind !== 'touch') crosshairVisible = true; }}
+    onmouseleave={() => { crosshairVisible = false; }}
     onmousedown={onMouseDown}
     onmousemove={onMouseMove}
     onmouseup={onMouseUp}
