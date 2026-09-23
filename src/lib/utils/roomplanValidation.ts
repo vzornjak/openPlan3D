@@ -1,5 +1,13 @@
-/** Shared format recognition for file imports and link admission. */
+import { isMultiSessionCapture } from './roomplanSessionFlatten';
+
+/** Shared format recognition for file imports and link admission.
+ *  Also accepts Apple's raw multi-session export shape
+ *  (`{ captureSessions: [{ roomplanSessions: [...] }] }`, produced when a
+ *  scan is paused/resumed across floors) — see roomplanSessionFlatten.ts,
+ *  which importRoomPlanFloors() runs first to normalise it before this
+ *  function's other checks ever see the data. */
 export function isRoomPlanJson(data: any): boolean {
+  if (isMultiSessionCapture(data)) return true;
   return !!data && (data.openplanPrepared === true || data.openplanHandoffVersion !== undefined ||
     (Array.isArray(data.walls) && data.walls.some((wall: any) => wall?.dimensions !== undefined)));
 }

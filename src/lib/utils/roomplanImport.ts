@@ -11,6 +11,7 @@ import { createDefaultProject, createDefaultFloor } from '$lib/stores/project';
 import { detectRooms, getRoomPolygon } from '$lib/utils/roomDetection';
 import { validateRoomPlan } from './roomplanValidation';
 import { importedFurnitureCategory } from './furnitureCategories';
+import { isMultiSessionCapture, flattenMultiSessionCapture } from './roomplanSessionFlatten';
 export { validateRoomPlan, isRoomPlanJson } from './roomplanValidation';
 
 function uid(): string {
@@ -820,6 +821,14 @@ export function importRoomPlanFloors(
   jsonData: any,
   options: RoomPlanImportOptions = roomPlanImportOptions(jsonData)
 ): Floor[] {
+  // Apple's raw export nests each paused/resumed scan session under
+  // captureSessions[].roomplanSessions[] — flatten that into the single
+  // flat shape the rest of this module (and validateRoomPlan) expects,
+  // before anything else runs. See roomplanSessionFlatten.ts for the
+  // story-assignment + cross-story-alignment reasoning.
+  if (isMultiSessionCapture(jsonData)) {
+    jsonData = flattenMultiSessionCapture(jsonData).data;
+  }
   validateRoomPlan(jsonData);
   const stories: RPStory[] = jsonData.stories ?? [];
   const tagged: { story?: number }[] = [
