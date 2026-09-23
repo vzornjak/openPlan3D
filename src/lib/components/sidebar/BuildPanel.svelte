@@ -19,6 +19,7 @@
   import FurnitureThumbnail from './FurnitureThumbnail.svelte';
   import CustomModelPanel from './CustomModelPanel.svelte';
   import { createProjectFromRoomPlan, extractRoomJsonFromZip, roomPlanImportOptions, validateRoomPlan, ORTHO_VERSION } from '$lib/utils/roomplanImport';
+  import { isMultiSessionCapture, flattenMultiSessionCapture } from '$lib/utils/roomplanSessionFlatten';
   import { currentProject } from '$lib/stores/project';
 
   const openingLifetime = new AbortController();
@@ -255,6 +256,13 @@
         } else {
           const text = await file.text();
           jsonData = JSON.parse(text);
+        }
+        // Apple's raw export nests paused/resumed scan sessions under
+        // captureSessions[].roomplanSessions[] - normalise to the flat
+        // shape validateRoomPlan/roomPlanImportOptions/createProjectFromRoomPlan
+        // all expect before any of them see this data.
+        if (isMultiSessionCapture(jsonData)) {
+          jsonData = flattenMultiSessionCapture(jsonData).data;
         }
         validateRoomPlan(jsonData);
         const options = roomPlanImportOptions(jsonData);
