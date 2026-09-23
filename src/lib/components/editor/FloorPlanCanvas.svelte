@@ -3276,6 +3276,13 @@
   let singleTouchActive = false;
   let singleTouchOrigin: { clientX: number; clientY: number } | null = null;
   let singleTouchMoved = false;
+  /** True from touchstart until either the finger lifts (tap — commits at
+   *  the release point) or crosses the drag threshold (commits mousedown
+   *  at the original press point). While true, touch only ever previews
+   *  the crosshair position — it never selects, places, or drags anything,
+   *  so an accidental touchdown can't silently commit before the user has
+   *  had a chance to see where the crosshair actually landed. */
+  let singleTouchPressPending = false;
   let lastTapTime = 0;
   let lastTapX = 0;
   let lastTapY = 0;
@@ -3319,15 +3326,19 @@
       singleTouchActive = true;
       singleTouchOrigin = { clientX: e.touches[0].clientX, clientY: e.touches[0].clientY };
       singleTouchMoved = false;
+      singleTouchPressPending = true;
       crosshairVisible = true;
-      dispatchMouse('mousedown', e.touches[0].clientX, e.touches[0].clientY);
+      // Preview the crosshair at the (lifted) touch position without
+      // committing anything yet — no mousedown until release or drag.
+      dispatchMouse('mousemove', e.touches[0].clientX, e.touches[0].clientY);
     } else if (e.touches.length === 2) {
       lastTapTime = 0;
       singleTouchOrigin = null;
       // Second finger landed: abandon any single-finger drag and start pinching
       if (singleTouchActive) {
-        dispatchMouse('mouseup', e.touches[0].clientX, e.touches[0].clientY);
+        if (!singleTouchPressPending) dispatchMouse('mouseup', e.touches[0].clientX, e.touches[0].clientY);
         singleTouchActive = false;
+        singleTouchPressPending = false;
       }
       const a = e.touches[0], b = e.touches[1];
       pinchState = {
@@ -3360,8 +3371,22 @@
       pinchState = { dist, cx, cy };
       markDirty();
     } else if (singleTouchActive && e.touches.length === 1) {
-      if (singleTouchOrigin && Math.hypot(e.touches[0].clientX - singleTouchOrigin.clientX,
-          e.touches[0].clientY - singleTouchOrigin.clientY) > 10) singleTouchMoved = true;
+      const movedPastThreshold = singleTouchOrigin && Math.hypot(e.touches[0].clientX - singleTouchOrigin.clientX,
+          e.touches[0].clientY - singleTouchOrigin.clientY) > 10;
+      if (movedPastThreshold) singleTouchMoved = true;
+      if (singleTouchPressPending) {
+        if (movedPastThreshold && singleTouchOrigin) {
+          // This is now a drag, not a tap: commit the press at the ORIGINAL
+          // touch-down point so hit-testing (which element is being
+          // dragged) anchors on where the gesture actually started.
+          singleTouchPressPending = false;
+          dispatchMouse('mousedown', singleTouchOrigin.clientX, singleTouchOrigin.clientY);
+        } else {
+          // Still within the tap threshold: keep previewing only.
+          dispatchMouse('mousemove', e.touches[0].clientX, e.touches[0].clientY);
+          return;
+        }
+      }
       dispatchMouse('mousemove', e.touches[0].clientX, e.touches[0].clientY);
     }
   }
@@ -3375,8 +3400,9 @@
       if (singleTouchActive) {
         singleTouchActive = false;
         const touch = e.changedTouches[0] ?? singleTouchOrigin;
-        if (touch) dispatchMouse('mouseup', touch.clientX, touch.clientY);
+        if (touch && !singleTouchPressPending) dispatchMouse('mouseup', touch.clientX, touch.clientY);
       }
+      singleTouchPressPending = false;
       singleTouchOrigin = null;
       return;
     }
@@ -3392,6 +3418,13 @@
           t.clientY - singleTouchOrigin.clientY) > 10) singleTouchMoved = true;
       singleTouchOrigin = null;
       if (!t) return;
+      if (singleTouchPressPending) {
+        // Never crossed the drag threshold — this is a tap. Commit the
+        // whole press+release at the point the crosshair was last shown
+        // (the finger's lift-off point), instead of firing early on touch-down.
+        singleTouchPressPending = false;
+        dispatchMouse('mousedown', t.clientX, t.clientY);
+      }
       dispatchMouse('mouseup', t.clientX, t.clientY);
       if (singleTouchMoved) { lastTapTime = 0; return; }
       // Synthesize click so document-level click-outside handlers (menus) fire
@@ -4176,49 +4209,67 @@
     ></canvas>
   {/if}
   <!-- Keep controls above classic horizontal scrollbars, which consume height on Linux. -->
-  <div style:--visible-bottom={`${zoomControlsBottom}px`} class="absolute bottom-2 right-2 max-md:bottom-[calc(var(--visible-bottom)+3rem)] max-md:left-2 max-md:overflow-x-auto max-md:min-h-12 max-md:items-center max-md:whitespace-nowrap max-md:[&>*]:shrink-0 bg-white/80 rounded px-2 py-1 text-xs text-gray-500 flex gap-3">
-    {#if detectedRooms.length > 0}
-      <span>{$t(detectedRooms.length === 1 ? 'canvasStatus.roomsOne' : 'canvasStatus.roomsMany', { count: detectedRooms.length })}</span>
-      <span>{formatArea(detectedRooms.reduce((s, r) => s + r.area, 0), $projectSettings.units)}</span>
-      <span class="text-gray-300">|</span>
-    {/if}
-    {#if currentFloor}
-      <span>{$t(currentFloor.walls.length === 1 ? 'canvasStatus.wallsOne' : 'canvasStatus.wallsMany', { count: currentFloor.walls.length })}</span>
-      {#if currentFloor.doors.length > 0}
-        <span>{$t(currentFloor.doors.length === 1 ? 'canvasStatus.doorsOne' : 'canvasStatus.doorsMany', { count: currentFloor.doors.length })}</span>
+  <!-- Bottom HUD: three explicit groups instead of one undifferentiated
+       row — Info (read-only counts), Tools (view/zoom controls that act on
+       the canvas), Layers (visibility toggles + the panel that opens more
+       of them). A thin divider + small caps label separates each group so
+       "what kind of control is this" is visible at a glance, not just
+       inferred from icon shape. -->
+  <div style:--visible-bottom={`${zoomControlsBottom}px`} class="absolute bottom-2 right-2 max-md:bottom-[calc(var(--visible-bottom)+3rem)] max-md:left-2 max-md:overflow-x-auto max-md:min-h-12 max-md:items-center max-md:whitespace-nowrap max-md:[&>*]:shrink-0 bg-white/90 rounded-lg shadow-sm border border-gray-200 px-2 py-1 text-xs text-gray-500 flex items-center gap-1">
+    <!-- Group: Info -->
+    <span class="flex items-center gap-2 px-1">
+      {#if detectedRooms.length > 0}
+        <span>{$t(detectedRooms.length === 1 ? 'canvasStatus.roomsOne' : 'canvasStatus.roomsMany', { count: detectedRooms.length })}</span>
+        <span>{formatArea(detectedRooms.reduce((s, r) => s + r.area, 0), $projectSettings.units)}</span>
       {/if}
-      {#if currentFloor.windows.length > 0}
-        <span>{$t(currentFloor.windows.length === 1 ? 'canvasStatus.windowsOne' : 'canvasStatus.windowsMany', { count: currentFloor.windows.length })}</span>
+      {#if currentFloor}
+        <span>{$t(currentFloor.walls.length === 1 ? 'canvasStatus.wallsOne' : 'canvasStatus.wallsMany', { count: currentFloor.walls.length })}</span>
+        {#if currentFloor.doors.length > 0}
+          <span>{$t(currentFloor.doors.length === 1 ? 'canvasStatus.doorsOne' : 'canvasStatus.doorsMany', { count: currentFloor.doors.length })}</span>
+        {/if}
+        {#if currentFloor.windows.length > 0}
+          <span>{$t(currentFloor.windows.length === 1 ? 'canvasStatus.windowsOne' : 'canvasStatus.windowsMany', { count: currentFloor.windows.length })}</span>
+        {/if}
+        {#if currentFloor.furniture.length > 0}
+          <span>{$t(currentFloor.furniture.length === 1 ? 'canvasStatus.objectsOne' : 'canvasStatus.objectsMany', { count: currentFloor.furniture.length })}</span>
+        {/if}
       {/if}
-      {#if currentFloor.furniture.length > 0}
-        <span>{$t(currentFloor.furniture.length === 1 ? 'canvasStatus.objectsOne' : 'canvasStatus.objectsMany', { count: currentFloor.furniture.length })}</span>
+      {#if currentSelectedIds.size > 1}
+        <span class="text-blue-600 font-medium">{$t('canvasStatus.selected', { count: currentSelectedIds.size })}</span>
       {/if}
-      <span class="text-gray-300">|</span>
-    {/if}
-    {#if currentSelectedIds.size > 1}
-      <span class="text-blue-600 font-medium">{$t('canvasStatus.selected', { count: currentSelectedIds.size })}</span>
-      <span class="text-gray-300">|</span>
-    {/if}
-    <span>{$t('canvasStatus.zoom', { value: Math.round(zoom * 100) })}</span>
-    <button class="hover:text-gray-700" onclick={() => zoomToFit()} title={$t('canvasZoom.fitHint')}>⊞ {$t('canvasDisplay.fit')}</button>
-    <button class="hover:text-gray-700" onclick={() => showGrid = !showGrid} title={$t('canvasDisplay.gridHint')} aria-pressed={showGrid}>
-      {showGrid ? '▦' : '▢'} {$t('canvasDisplay.grid')}
-    </button>
-    <button class="hover:text-gray-700" onclick={() => projectSettings.update(s => ({ ...s, snapToGrid: !s.snapToGrid }))} title={$t('canvasDisplay.snapHint')} aria-pressed={currentSnapToGrid}>
-      {currentSnapToGrid ? '🧲' : '↔'} {$t('canvasDisplay.snap')}
-    </button>
-    <button class="hover:text-gray-700" onclick={() => layerVisibility.update(v => ({ ...v, furniture: !v.furniture }))} title={$t('canvasDisplay.furnitureHint')} aria-pressed={showFurniture}>
-      {showFurniture ? '🪑' : '👻'} {$t('canvasDisplay.furniture')}
-    </button>
-    <button class="hover:text-gray-700" onclick={() => showLayerPanel = !showLayerPanel} title={$t('layerVisibility.title')}>
-      🗂 {$t('layers.title')}
-    </button>
-    <button class="hover:text-gray-700" onclick={() => showRulers = !showRulers} title={$t('canvasDisplay.rulersHint')} aria-pressed={showRulers}>
-      {showRulers ? '📏' : '📐'} {$t('canvasDisplay.rulers')}
-    </button>
-    <button class="hover:text-gray-700" onclick={() => showMinimap = !showMinimap} title={$t('canvasDisplay.mapHint')} aria-pressed={showMinimap}>
-      {showMinimap ? '🗺' : '🗺'} {$t('canvasDisplay.map')}
-    </button>
+    </span>
+
+    <span class="w-px h-4 bg-gray-200 mx-0.5"></span>
+
+    <!-- Group: Tools (act on the canvas view) -->
+    <span class="flex items-center gap-1 px-1">
+      <span class="text-gray-400">{$t('canvasStatus.zoom', { value: Math.round(zoom * 100) })}</span>
+      <button class="hover:text-gray-700 hover:bg-gray-100 rounded px-1 py-0.5" onclick={() => zoomToFit()} title={$t('canvasZoom.fitHint')}>⊞ {$t('canvasDisplay.fit')}</button>
+      <button class="hover:text-gray-700 hover:bg-gray-100 rounded px-1 py-0.5" onclick={() => showGrid = !showGrid} title={$t('canvasDisplay.gridHint')} aria-pressed={showGrid}>
+        {showGrid ? '▦' : '▢'} {$t('canvasDisplay.grid')}
+      </button>
+      <button class="hover:text-gray-700 hover:bg-gray-100 rounded px-1 py-0.5" onclick={() => projectSettings.update(s => ({ ...s, snapToGrid: !s.snapToGrid }))} title={$t('canvasDisplay.snapHint')} aria-pressed={currentSnapToGrid}>
+        {currentSnapToGrid ? '🧲' : '↔'} {$t('canvasDisplay.snap')}
+      </button>
+    </span>
+
+    <span class="w-px h-4 bg-gray-200 mx-0.5"></span>
+
+    <!-- Group: Layers (visibility toggles) -->
+    <span class="flex items-center gap-1 px-1">
+      <button class="hover:text-gray-700 hover:bg-gray-100 rounded px-1 py-0.5" onclick={() => layerVisibility.update(v => ({ ...v, furniture: !v.furniture }))} title={$t('canvasDisplay.furnitureHint')} aria-pressed={showFurniture}>
+        {showFurniture ? '🪑' : '👻'} {$t('canvasDisplay.furniture')}
+      </button>
+      <button class="hover:text-gray-700 hover:bg-gray-100 rounded px-1 py-0.5" onclick={() => showRulers = !showRulers} title={$t('canvasDisplay.rulersHint')} aria-pressed={showRulers}>
+        {showRulers ? '📏' : '📐'} {$t('canvasDisplay.rulers')}
+      </button>
+      <button class="hover:text-gray-700 hover:bg-gray-100 rounded px-1 py-0.5" onclick={() => showMinimap = !showMinimap} title={$t('canvasDisplay.mapHint')} aria-pressed={showMinimap}>
+        🗺 {$t('canvasDisplay.map')}
+      </button>
+      <button class="hover:text-gray-700 hover:bg-gray-100 rounded px-1 py-0.5 font-medium" class:text-blue-600={showLayerPanel} class:bg-blue-50={showLayerPanel} onclick={() => showLayerPanel = !showLayerPanel} title={$t('layerVisibility.title')} aria-pressed={showLayerPanel}>
+        🗂 {$t('layers.title')}
+      </button>
+    </span>
   </div>
   <!-- Layer Visibility Panel -->
   {#if showLayerPanel}
