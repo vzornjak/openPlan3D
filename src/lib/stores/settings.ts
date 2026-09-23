@@ -12,6 +12,8 @@ export interface ProjectSettings {
   snapToGrid: boolean;                   // snap elements to grid when dragging
   snapToWalls: boolean;                  // snap furniture to nearby walls when dragging
   gridSize: number;                      // grid snap size in cm (default 25)
+  angleSnapEnabled: boolean;             // snap wall-drawing angle to increments (AutoCAD 'Polar Tracking')
+  angleSnapIncrement: number;            // angle snap increment in degrees (default 45; e.g. 90, 30, 15)
 }
 
 const defaultSettings: ProjectSettings = {
@@ -26,6 +28,8 @@ const defaultSettings: ProjectSettings = {
   snapToGrid: true,
   snapToWalls: true,
   gridSize: 25,
+  angleSnapEnabled: true,
+  angleSnapIncrement: 45,
 };
 
 // Load from localStorage if available

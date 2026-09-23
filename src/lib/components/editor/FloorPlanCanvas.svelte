@@ -208,6 +208,10 @@
   let currentSnapToGrid: boolean = $state(true);
   let currentSnapToWalls: boolean = $state(true);
   let currentGridSize: number = $state(25);
+  /** AutoCAD-style 'Polar Tracking': snap wall-drawing angle to increments
+   *  of currentAngleSnapIncrement degrees (default 45 deg) while enabled. */
+  let currentAngleSnapEnabled: boolean = $state(true);
+  let currentAngleSnapIncrement: number = $state(45);
   let isPlacingStair: boolean = $state(false);
   let draggingStairId: string | null = $state(null);
   let stairDragOffset: Point = { x: 0, y: 0 };
@@ -404,15 +408,30 @@
     return best;
   }
 
+  /** Candidate snap angles for the current angle-snap increment, spanning
+   *  the full circle (e.g. 45deg -> 8 angles, 90deg -> 4, 30deg -> 12). */
+  function angleSnapCandidates(): number[] {
+    const stepDeg = currentAngleSnapIncrement > 0 ? currentAngleSnapIncrement : 45;
+    const stepRad = (stepDeg * Math.PI) / 180;
+    const count = Math.max(1, Math.round(360 / stepDeg));
+    const angles: number[] = [];
+    for (let i = 0; i < count; i++) {
+      let a = -Math.PI + i * stepRad;
+      if (a > Math.PI) a -= 2 * Math.PI;
+      angles.push(a);
+    }
+    return angles;
+  }
+
   function angleSnap(start: Point, end: Point): Point {
-    if (!currentSnapEnabled) return end;
+    if (!currentSnapEnabled || !currentAngleSnapEnabled) return end;
     const dx = end.x - start.x;
     const dy = end.y - start.y;
     const len = Math.hypot(dx, dy);
     if (len < 5) return end;
     const angle = Math.atan2(dy, dx);
-    const snapAngles = [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4, Math.PI, -Math.PI, -3 * Math.PI / 4, -Math.PI / 2, -Math.PI / 4];
-    const ANGLE_THRESHOLD = Math.PI / 18;
+    const snapAngles = angleSnapCandidates();
+    const ANGLE_THRESHOLD = Math.min(Math.PI / 18, ((currentAngleSnapIncrement > 0 ? currentAngleSnapIncrement : 45) * Math.PI / 180) / 2);
     for (const sa of snapAngles) {
       if (Math.abs(angle - sa) < ANGLE_THRESHOLD) {
         return { x: start.x + len * Math.cos(sa), y: start.y + len * Math.sin(sa) };
@@ -1904,7 +1923,11 @@
     const unsub8 = placingDoorType.subscribe((t) => { currentDoorType = t; markDirty(); });
     const unsub9 = placingWindowType.subscribe((t) => { currentWindowType = t; markDirty(); });
     const unsub10 = snapEnabled.subscribe((v) => { currentSnapEnabled = v; markDirty(); });
-    const unsub_snapgrid = projectSettings.subscribe((s) => { currentSnapToGrid = s.snapToGrid; currentSnapToWalls = s.snapToWalls; currentGridSize = s.gridSize; markDirty(); });
+    const unsub_snapgrid = projectSettings.subscribe((s) => {
+      currentSnapToGrid = s.snapToGrid; currentSnapToWalls = s.snapToWalls; currentGridSize = s.gridSize;
+      currentAngleSnapEnabled = s.angleSnapEnabled ?? true; currentAngleSnapIncrement = s.angleSnapIncrement || 45;
+      markDirty();
+    });
     const unsub11 = placingStair.subscribe((v) => { isPlacingStair = v; markDirty(); });
     const unsubEnt1 = placingEntourageId.subscribe((id) => { currentEntourageDefId = id; markDirty(); });
     const unsubEnt2 = currentProject.subscribe((pr) => {
@@ -3454,7 +3477,7 @@
       const slen = Math.hypot(sdx, sdy);
       if (slen > 5) {
         const rawAngle = Math.atan2(sdy, sdx);
-        const snapAngles = [0, Math.PI / 4, Math.PI / 2, 3 * Math.PI / 4, Math.PI, -Math.PI, -3 * Math.PI / 4, -Math.PI / 2, -Math.PI / 4];
+        const snapAngles = angleSnapCandidates();
         let bestAngle = 0, bestDiff = Infinity;
         for (const sa of snapAngles) { const diff = Math.abs(rawAngle - sa); if (diff < bestDiff) { bestDiff = diff; bestAngle = sa; } }
         endPt = { x: wallStart.x + slen * Math.cos(bestAngle), y: wallStart.y + slen * Math.sin(bestAngle) };

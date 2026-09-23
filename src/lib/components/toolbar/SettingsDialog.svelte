@@ -78,6 +78,8 @@
     snapToGrid: true,
     snapToWalls: true,
     gridSize: 25,
+    angleSnapEnabled: true,
+    angleSnapIncrement: 45,
   });
 
   onDestroy(projectSettings.subscribe((s) => { settings = { ...s }; }));
@@ -173,6 +175,74 @@
                   before:content-[''] before:absolute before:w-4 before:h-4 before:rounded-full before:bg-white before:top-0.5 before:left-0.5 before:transition-transform checked:before:translate-x-5"
               />
             </label>
+            <label class="flex items-center justify-between px-4 py-3.5 cursor-pointer">
+              <span class="text-sm text-gray-700 dark:text-gray-300" title={$t('settings.gridSnapHelp')}>{$t('settings.gridSnap')}</span>
+              <input
+                type="checkbox"
+                checked={settings.snapToGrid}
+                onchange={(e) => updateSetting('snapToGrid', (e.target as HTMLInputElement).checked)}
+                class="w-10 h-5 rounded-full appearance-none cursor-pointer bg-gray-300 checked:bg-slate-700 relative transition-colors
+                  before:content-[''] before:absolute before:w-4 before:h-4 before:rounded-full before:bg-white before:top-0.5 before:left-0.5 before:transition-transform checked:before:translate-x-5"
+              />
+            </label>
+            {#if settings.snapToGrid}
+              <div class="flex items-center justify-between px-4 py-3.5">
+                <span class="text-sm text-gray-700 dark:text-gray-300">{$t('settings.gridSize')}</span>
+                <div class="flex items-center gap-1">
+                  <input
+                    type="number"
+                    min="1"
+                    max="500"
+                    step="1"
+                    value={settings.gridSize}
+                    onchange={(e) => {
+                      const v = parseFloat((e.target as HTMLInputElement).value);
+                      if (Number.isFinite(v) && v > 0) updateSetting('gridSize', v);
+                    }}
+                    class="w-16 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded text-sm text-right bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-slate-500 focus:border-slate-500 outline-none"
+                  />
+                  <span class="text-xs text-gray-400">cm</span>
+                </div>
+              </div>
+            {/if}
+            <label class="flex items-center justify-between px-4 py-3.5 cursor-pointer">
+              <span class="text-sm text-gray-700 dark:text-gray-300" title={$t('settings.angleSnapHelp')}>{$t('settings.angleSnap')}</span>
+              <input
+                type="checkbox"
+                checked={settings.angleSnapEnabled}
+                onchange={(e) => updateSetting('angleSnapEnabled', (e.target as HTMLInputElement).checked)}
+                class="w-10 h-5 rounded-full appearance-none cursor-pointer bg-gray-300 checked:bg-slate-700 relative transition-colors
+                  before:content-[''] before:absolute before:w-4 before:h-4 before:rounded-full before:bg-white before:top-0.5 before:left-0.5 before:transition-transform checked:before:translate-x-5"
+              />
+            </label>
+            {#if settings.angleSnapEnabled}
+              <div class="flex items-center justify-between px-4 py-3.5">
+                <span class="text-sm text-gray-700 dark:text-gray-300">{$t('settings.angleSnapIncrement')}</span>
+                <div class="flex items-center gap-1">
+                  <input
+                    type="number"
+                    min="1"
+                    max="180"
+                    step="1"
+                    value={settings.angleSnapIncrement}
+                    onchange={(e) => {
+                      const v = parseFloat((e.target as HTMLInputElement).value);
+                      if (Number.isFinite(v) && v > 0 && v <= 180) updateSetting('angleSnapIncrement', v);
+                    }}
+                    class="w-16 px-2 py-1 border border-gray-300 dark:border-gray-600 rounded text-sm text-right bg-white dark:bg-gray-700 dark:text-gray-100 focus:ring-2 focus:ring-slate-500 focus:border-slate-500 outline-none"
+                  />
+                  <span class="text-xs text-gray-400">°</span>
+                </div>
+              </div>
+              <div class="px-4 py-2 flex flex-wrap gap-1.5">
+                {#each [90, 45, 30, 15, 5] as preset}
+                  <button
+                    class="px-2.5 py-1 text-xs rounded-md border transition-colors {settings.angleSnapIncrement === preset ? 'bg-slate-700 text-white border-slate-700' : 'bg-white dark:bg-gray-700 text-gray-600 dark:text-gray-300 border-gray-300 dark:border-gray-600 hover:bg-gray-50 dark:hover:bg-gray-600'}"
+                    onclick={() => updateSetting('angleSnapIncrement', preset)}
+                  >{preset}°</button>
+                {/each}
+              </div>
+            {/if}
           </div>
 
           <!-- Metrics Unit Toggle -->
