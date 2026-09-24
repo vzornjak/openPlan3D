@@ -887,11 +887,15 @@
       : magneticSnap(mousePos);
     const isMagnetic = !!(snapped.snappedToEndpoint || snapped.snappedToWall);
     const sp = worldToScreen(snapped.x, snapped.y);
+    // Parked (touch lifted, waiting for a confirming tap): a filled ring
+    // instead of the plain dot, so it visibly reads as "holding, tap to
+    // confirm" rather than "still following a live finger".
+    const isParked = !!parkedTouchPoint;
 
     ctx.save();
     const armLen = 11;
     const gap = 4;
-    const color = isMagnetic ? '#22c55e' : '#3b82f6';
+    const color = isParked ? '#f59e0b' : isMagnetic ? '#22c55e' : '#3b82f6';
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5;
     ctx.beginPath();
@@ -901,7 +905,19 @@
     ctx.moveTo(sp.x, sp.y + gap); ctx.lineTo(sp.x, sp.y + gap + armLen);
     ctx.stroke();
 
-    if (isMagnetic) {
+    if (isParked) {
+      // Parked marker: hollow ring (bigger than the magnet ring so the two
+      // states are never ambiguous) — "this is where a tap will confirm".
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 8, 0, Math.PI * 2);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.arc(sp.x, sp.y, 2, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.fill();
+    } else if (isMagnetic) {
       // Magnet ring — filled dot at the exact snap target plus a halo,
       // matching the small-magnet look requested for endpoints/edges.
       ctx.beginPath();
@@ -1913,6 +1929,7 @@
         wallStart = null;
         wallSequenceFirst = null;
         typedWallLength = '';
+        parkedTouchPoint = null;
       }
       currentTool = t;
       textAnnotationMode = t === 'text';
@@ -3310,6 +3327,29 @@
   let lastTapX = 0;
   let lastTapY = 0;
 
+  /** Point-placement tools (drawing a wall, dropping furniture/stairs/
+   *  columns, measuring, annotating, placing a text label) use AutoCAD
+   *  mobile's "park & confirm" gesture instead of tap-to-commit:
+   *    - Drag: the crosshair follows the finger, nothing happens yet.
+   *    - Lift: the crosshair PARKS at that spot — still nothing committed.
+   *    - A separate tap ANYWHERE on the canvas confirms the action at the
+   *      parked position (not at the tap's own position).
+   *    - Instead of tapping, dragging again resumes moving the crosshair
+   *      from where it was parked.
+   *  This only applies to placing new points; selecting/dragging existing
+   *  elements (the 'select' tool) keeps the immediate drag behaviour from
+   *  before — you are manipulating something already on the canvas, not
+   *  choosing where the next point goes, so there's nothing to "confirm"
+   *  separately. */
+  function isPointPlacementTool(): boolean {
+    return currentTool === 'wall' || currentTool === 'furniture' || currentTool === 'measure'
+      || currentTool === 'annotate' || textAnnotationMode || isPlacingStair || isPlacingColumn;
+  }
+  /** The parked crosshair position (screen coords, pre-lift) while a
+   *  point-placement gesture is holding for confirmation — null when
+   *  nothing is parked (finger currently down, or nothing pending at all). */
+  let parkedTouchPoint: { clientX: number; clientY: number } | null = null;
+
   /** Classify the input device driving canvas pointer events (mouse vs pen
    *  vs touch) before mousedown/touchstart fire, purely for crosshair
    *  behaviour — does not affect selection/drawing logic. */
@@ -3351,6 +3391,14 @@
       singleTouchMoved = false;
       singleTouchPressPending = true;
       crosshairVisible = true;
+      if (isPointPlacementTool() && parkedTouchPoint) {
+        // A point is already parked from a previous lift. This new touch
+        // decides, on release, whether it was a TAP (confirm the parked
+        // point) or a DRAG (abandon the park and resume following the
+        // finger) — see onTouchMove/onTouchEnd. Nothing to preview yet:
+        // the crosshair stays exactly where it was parked until we know.
+        return;
+      }
       // Preview the crosshair at the (lifted) touch position without
       // committing anything yet — no mousedown until release or drag.
       dispatchMouse('mousemove', e.touches[0].clientX, e.touches[0].clientY);
@@ -3397,6 +3445,26 @@
       const movedPastThreshold = singleTouchOrigin && Math.hypot(e.touches[0].clientX - singleTouchOrigin.clientX,
           e.touches[0].clientY - singleTouchOrigin.clientY) > 10;
       if (movedPastThreshold) singleTouchMoved = true;
+
+      if (isPointPlacementTool()) {
+        // Park & confirm: dragging always just previews (never commits a
+        // point). Crossing the drag threshold abandons any earlier park —
+        // the user chose to keep moving the crosshair instead of tapping
+        // to confirm it — and resumes following the finger from here.
+        if (movedPastThreshold) {
+          if (parkedTouchPoint) parkedTouchPoint = null;
+          dispatchMouse('mousemove', e.touches[0].clientX, e.touches[0].clientY);
+        } else if (!parkedTouchPoint) {
+          // No park to protect yet: track the finger normally below the
+          // drag threshold so the crosshair still feels live during a tap.
+          dispatchMouse('mousemove', e.touches[0].clientX, e.touches[0].clientY);
+        }
+        // Else: something is parked and this touch hasn't proven itself a
+        // drag yet — leave the crosshair exactly where it was parked
+        // until onTouchEnd knows whether this was a tap or a drag.
+        return;
+      }
+
       if (singleTouchPressPending) {
         if (movedPastThreshold && singleTouchOrigin) {
           // This is now a drag, not a tap: commit the press at the ORIGINAL
@@ -3416,10 +3484,11 @@
 
   function onTouchEnd(e: TouchEvent) {
     e.preventDefault();
-    crosshairVisible = false;
     if (e.type === 'touchcancel') {
+      crosshairVisible = false;
       pinchState = null;
       lastTapTime = 0;
+      parkedTouchPoint = null;
       if (singleTouchActive) {
         singleTouchActive = false;
         const touch = e.changedTouches[0] ?? singleTouchOrigin;
@@ -3437,10 +3506,63 @@
     if (singleTouchActive && e.touches.length === 0) {
       const t = e.changedTouches[0] ?? singleTouchOrigin;
       singleTouchActive = false;
-      if (t && singleTouchOrigin && Math.hypot(t.clientX - singleTouchOrigin.clientX,
-          t.clientY - singleTouchOrigin.clientY) > 10) singleTouchMoved = true;
+      const wasDrag = !!(t && singleTouchOrigin && Math.hypot(t.clientX - singleTouchOrigin.clientX,
+          t.clientY - singleTouchOrigin.clientY) > 10);
+      if (wasDrag) singleTouchMoved = true;
       singleTouchOrigin = null;
-      if (!t) return;
+      if (!t) { crosshairVisible = false; return; }
+
+      if (isPointPlacementTool()) {
+        singleTouchPressPending = false;
+        if (wasDrag) {
+          // Finger dragged the crosshair and is now lifting: PARK here —
+          // do not confirm anything yet. The crosshair stays visible at
+          // this exact spot until a separate tap confirms it (or another
+          // drag moves it again).
+          parkedTouchPoint = { clientX: t.clientX, clientY: t.clientY };
+          dispatchMouse('mousemove', t.clientX, t.clientY);
+          crosshairVisible = true;
+          return;
+        }
+        if (parkedTouchPoint) {
+          // A clean tap while something was parked: CONFIRM the action at
+          // the parked position — not at wherever this tap itself landed.
+          const p = parkedTouchPoint;
+          parkedTouchPoint = null;
+          dispatchMouse('mousemove', p.clientX, p.clientY);
+          dispatchMouse('mousedown', p.clientX, p.clientY);
+          dispatchMouse('mouseup', p.clientX, p.clientY);
+          dispatchMouse('click', p.clientX, p.clientY);
+          // A second confirming tap shortly after another, near the same
+          // spot, finishes multi-point sequences (wall chains) exactly
+          // like a mouse double-click would.
+          const now = Date.now();
+          if (now - lastTapTime < 350 && Math.hypot(p.clientX - lastTapX, p.clientY - lastTapY) < 30) {
+            dispatchMouse('dblclick', p.clientX, p.clientY);
+            lastTapTime = 0;
+          } else {
+            lastTapTime = now;
+            lastTapX = p.clientX;
+            lastTapY = p.clientY;
+          }
+          crosshairVisible = true;
+          return;
+        }
+        // Plain tap with nothing parked yet (e.g. the very first point of
+        // a wall chain): confirm immediately at the tap position, same as
+        // a normal click would.
+        dispatchMouse('mousemove', t.clientX, t.clientY);
+        dispatchMouse('mousedown', t.clientX, t.clientY);
+        dispatchMouse('mouseup', t.clientX, t.clientY);
+        dispatchMouse('click', t.clientX, t.clientY);
+        lastTapTime = Date.now();
+        lastTapX = t.clientX;
+        lastTapY = t.clientY;
+        crosshairVisible = false;
+        return;
+      }
+
+      crosshairVisible = false;
       if (singleTouchPressPending) {
         // Never crossed the drag threshold — this is a tap. Commit the
         // whole press+release at the point the crosshair was last shown
@@ -3608,6 +3730,7 @@
       annotationStart = null;
       marqueeStart = null;
       marqueeEnd = null;
+      parkedTouchPoint = null;
     }
 
     // Select All (Ctrl+A / Cmd+A)
