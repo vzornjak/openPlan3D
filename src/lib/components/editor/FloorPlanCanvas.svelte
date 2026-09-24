@@ -3349,6 +3349,11 @@
    *  point-placement gesture is holding for confirmation — null when
    *  nothing is parked (finger currently down, or nothing pending at all). */
   let parkedTouchPoint: { clientX: number; clientY: number } | null = null;
+  /** Armed by the bottom action bar's Move button: the NEXT touch drag in
+   *  select mode moves the selected element (via the existing mousedown
+   *  pipeline) instead of panning the canvas. Auto-clears once that one
+   *  drag finishes or is cancelled. */
+  let touchMoveArmed = $state(false);
 
   /** Classify the input device driving canvas pointer events (mouse vs pen
    *  vs touch) before mousedown/touchstart fire, purely for crosshair
@@ -3446,6 +3451,44 @@
           e.touches[0].clientY - singleTouchOrigin.clientY) > 10;
       if (movedPastThreshold) singleTouchMoved = true;
 
+      if (currentTool === 'select' && !isPointPlacementTool() && !touchMoveArmed) {
+        // Select mode: one finger dragging always pans the canvas — it
+        // never hit-tests/selects/drags an existing element. To move
+        // something, select it first (a tap) then use the bottom action
+        // bar's Move tool; a bare drag is unambiguously "look around".
+        if (movedPastThreshold) {
+          if (!isPanning) {
+            // First frame past the threshold: start panning from the
+            // ORIGINAL touch-down point so the very first frame doesn't
+            // jump. singleTouchPressPending is cleared so onTouchEnd
+            // knows this was a pan, not a pending tap.
+            isPanning = true;
+            singleTouchPressPending = false;
+            panStartX = singleTouchOrigin ? singleTouchOrigin.clientX : e.touches[0].clientX;
+            panStartY = singleTouchOrigin ? singleTouchOrigin.clientY : e.touches[0].clientY;
+          }
+          camX -= (e.touches[0].clientX - panStartX) / zoom;
+          camY -= (e.touches[0].clientY - panStartY) / zoom;
+          panStartX = e.touches[0].clientX;
+          panStartY = e.touches[0].clientY;
+          markDirty();
+        }
+        return;
+      }
+
+      if (touchMoveArmed && movedPastThreshold && singleTouchPressPending && singleTouchOrigin) {
+        // Move armed: this drag goes through the existing mousedown-based
+        // hit-test/drag pipeline instead of panning, so it moves whatever
+        // is selected under the original touch-down point exactly like a
+        // mouse drag already does. One-shot: consumed the instant the
+        // drag actually starts.
+        singleTouchPressPending = false;
+        touchMoveArmed = false;
+        dispatchMouse('mousedown', singleTouchOrigin.clientX, singleTouchOrigin.clientY);
+        dispatchMouse('mousemove', e.touches[0].clientX, e.touches[0].clientY);
+        return;
+      }
+
       if (isPointPlacementTool()) {
         // Park & confirm: dragging always just previews (never commits a
         // point). Crossing the drag threshold abandons any earlier park —
@@ -3492,8 +3535,9 @@
       if (singleTouchActive) {
         singleTouchActive = false;
         const touch = e.changedTouches[0] ?? singleTouchOrigin;
-        if (touch && !singleTouchPressPending) dispatchMouse('mouseup', touch.clientX, touch.clientY);
+        if (touch && !singleTouchPressPending && !isPanning) dispatchMouse('mouseup', touch.clientX, touch.clientY);
       }
+      isPanning = false;
       singleTouchPressPending = false;
       singleTouchOrigin = null;
       return;
@@ -3563,6 +3607,21 @@
       }
 
       crosshairVisible = false;
+      if (isPanning) {
+        // This was a select-mode pan (onTouchMove already moved the
+        // camera directly) — finish it without ever selecting/dragging
+        // an element. No mousedown was sent for this gesture, so there
+        // is nothing to release either.
+        isPanning = false;
+        lastTapTime = 0;
+        return;
+      }
+      if (touchMoveArmed) {
+        // Move was armed but this touch ended without ever crossing the
+        // drag threshold (a tap, not a drag) — disarm rather than leaving
+        // it primed for some unrelated later gesture.
+        touchMoveArmed = false;
+      }
       if (singleTouchPressPending) {
         // Never crossed the drag threshold — this is a tap. Commit the
         // whole press+release at the point the crosshair was last shown
@@ -4443,47 +4502,64 @@
     </div>
   {/if}
 
-  <!-- Contextual Toolbar (hidden while the integrated elevation view covers the canvas) -->
+  <!-- Selection Action Bar: a fixed bar at the bottom of the canvas that
+       replaces the old floating toolbar (which sat above the element and
+       moved/hid itself as the canvas panned). AutoCAD-style: stays put,
+       shows the actions relevant to whatever is selected — Properties,
+       Move, Duplicate, Mirror/flip-swing, Split (walls), Delete. -->
   {#if (currentSelectedId || currentSelectedIds.size > 0) && currentFloor && currentTool === 'select' && !elevationOpen}
     {@const el = (() => {
       const f = currentFloor;
       const wall = f.walls.find(w => w.id === currentSelectedId);
-      if (wall) {
-        const s = worldToScreen((wall.start.x + wall.end.x) / 2, (wall.start.y + wall.end.y) / 2);
-        return { type: 'wall', pos: s };
-      }
+      if (wall) return { type: 'wall' as const, wall };
       const door = f.doors.find(d => d.id === currentSelectedId);
-      if (door) {
-        const w = f.walls.find(w => w.id === door.wallId);
-        if (w) {
-          const s = worldToScreen(w.start.x + (w.end.x - w.start.x) * door.position, w.start.y + (w.end.y - w.start.y) * door.position);
-          return { type: 'door', pos: s, door };
-        }
-      }
+      if (door) return { type: 'door' as const, door };
       const win = f.windows.find(w => w.id === currentSelectedId);
-      if (win) {
-        const w = f.walls.find(w => w.id === win.wallId);
-        if (w) {
-          const s = worldToScreen(w.start.x + (w.end.x - w.start.x) * win.position, w.start.y + (w.end.y - w.start.y) * win.position);
-          return { type: 'window', pos: s };
-        }
-      }
+      if (win) return { type: 'window' as const };
       const furn = f.furniture.find(fi => fi.id === currentSelectedId);
-      if (furn) {
-        const s = worldToScreen(furn.position.x, furn.position.y);
-        return { type: 'furniture', pos: s };
-      }
+      if (furn) return { type: 'furniture' as const, furn };
       const positioned = [...f.stairs ?? [], ...f.columns ?? [], ...f.entourage ?? []].find(item => item.id === currentSelectedId);
-      if (positioned) return { type: 'object', pos: worldToScreen(positioned.position.x, positioned.position.y) };
+      if (positioned) return { type: 'object' as const };
       return null;
     })()}
     {#if el}
       <div
-        class="absolute z-40 flex items-center gap-0.5 bg-white rounded-lg shadow-lg border border-gray-200 px-1 py-0.5"
-        style="left: {el.pos.x}px; top: {el.pos.y - 44}px; transform: translateX(-50%);"
+        style:--visible-bottom={`${zoomControlsBottom}px`}
+        class="absolute bottom-2 left-1/2 -translate-x-1/2 max-md:bottom-[calc(var(--visible-bottom)+3rem)] z-40 flex items-center gap-0.5 bg-white rounded-lg shadow-lg border border-gray-200 px-1 py-0.5"
       >
         <button
-          class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700"
+          class="w-8 h-8 flex flex-col items-center justify-center gap-0.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700"
+          title={$t('contextMenu.properties')}
+          aria-label={$t('contextMenu.properties')}
+          onclick={() => {
+            void tick().then(() => {
+              const panel = document.querySelector('[data-plan-properties]:not(.hidden)');
+              panel?.querySelector<HTMLElement>(
+                'input:not(:disabled):not([type="hidden"]), select:not(:disabled), textarea:not(:disabled), button:not(:disabled)'
+              )?.focus();
+              panel?.scrollIntoView({ block: 'nearest' });
+            });
+          }}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.68 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09A1.65 1.65 0 0015 4.6a1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
+          <span class="text-[9px] leading-none">{$t('contextMenu.properties')}</span>
+        </button>
+
+        <button
+          class="w-8 h-8 flex flex-col items-center justify-center gap-0.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700"
+          title={$t('canvasActions.move')}
+          aria-label={$t('canvasActions.move')}
+          onclick={() => { touchMoveArmed = true; }}
+          aria-pressed={touchMoveArmed}
+          class:text-blue-600={touchMoveArmed}
+          class:bg-blue-50={touchMoveArmed}
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polyline points="5 9 2 12 5 15"/><polyline points="9 5 12 2 15 5"/><polyline points="15 19 12 22 9 19"/><polyline points="19 9 22 12 19 15"/><line x1="2" y1="12" x2="22" y2="12"/><line x1="12" y1="2" x2="12" y2="22"/></svg>
+          <span class="text-[9px] leading-none">{$t('canvasActions.move')}</span>
+        </button>
+
+        <button
+          class="w-8 h-8 flex flex-col items-center justify-center gap-0.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700"
           title={$t('contextMenu.duplicate')}
           aria-label={$t('contextMenu.duplicate')}
           onclick={() => {
@@ -4496,21 +4572,50 @@
             }
           }}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1"/></svg>
+          <span class="text-[9px] leading-none">{$t('canvasActions.copy')}</span>
         </button>
+
+        {#if el.type === 'furniture'}
+          <button
+            class="w-8 h-8 flex flex-col items-center justify-center gap-0.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700"
+            title={$t('contextMenu.flipHorizontal')}
+            aria-label={$t('contextMenu.flipHorizontal')}
+            onclick={() => {
+              if (!currentSelectedId || !el.furn) return;
+              const fi = el.furn;
+              scaleFurniture(currentSelectedId, { x: -(fi.scale?.x ?? 1), y: fi.scale?.y ?? 1 });
+            }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 3H5a2 2 0 00-2 2v14a2 2 0 002 2h3M16 3h3a2 2 0 012 2v14a2 2 0 01-2 2h-3M12 2v20"/></svg>
+            <span class="text-[9px] leading-none">{$t('canvasActions.mirror')}</span>
+          </button>
+          <button
+            class="w-8 h-8 flex flex-col items-center justify-center gap-0.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700"
+            title={$t('contextMenu.rotate90')}
+            aria-label={$t('contextMenu.rotate90')}
+            onclick={() => { if (currentSelectedId) rotateFurniture(currentSelectedId, 90); }}
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21.5 2v6h-6M2.5 22v-6h6M2 11.5a10 10 0 0118-6.36L21.5 8M22 12.5a10 10 0 01-18 6.36L2.5 16"/></svg>
+            <span class="text-[9px] leading-none">{$t('canvasActions.rotate')}</span>
+          </button>
+        {/if}
+
         {#if el.type === 'door' && el.door}
           <button
-            class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700"
+            class="w-8 h-8 flex flex-col items-center justify-center gap-0.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700"
             title={$t('canvasActions.flipSwing')}
             aria-label={$t('canvasActions.flipSwing')}
             onclick={() => { if (el.door) updateDoor(el.door.id, { swingDirection: el.door.swingDirection === 'left' ? 'right' : 'left' }); }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4"/></svg>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M7 16V4m0 0L3 8m4-4l4 4M17 8v12m0 0l4-4m-4 4l-4-4"/></svg>
+            <span class="text-[9px] leading-none">{$t('canvasActions.mirror')}</span>
           </button>
         {/if}
+
         {#if el.type === 'wall' && currentSelectedId && currentSelectedIds.size === 0}
           <button
-            class="w-7 h-7 flex items-center justify-center rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700"
+            class="w-8 h-8 flex flex-col items-center justify-center gap-0.5 rounded hover:bg-gray-100 text-gray-500 hover:text-gray-700"
             title={$t('canvasActions.splitMidpoint')}
             aria-label={$t('canvasActions.splitMidpoint')}
             onclick={() => {
@@ -4520,12 +4625,15 @@
               }
             }}
           >
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M4 12h4M16 12h4"/></svg>
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2v20M4 12h4M16 12h4"/></svg>
+            <span class="text-[9px] leading-none">{$t('canvasActions.split')}</span>
           </button>
         {/if}
-        <div class="w-px h-5 bg-gray-200 mx-0.5"></div>
+
+        <div class="w-px h-6 bg-gray-200 mx-0.5"></div>
+
         <button
-          class="w-7 h-7 flex items-center justify-center rounded hover:bg-red-50 text-gray-400 hover:text-red-600"
+          class="w-8 h-8 flex flex-col items-center justify-center gap-0.5 rounded hover:bg-red-50 text-gray-400 hover:text-red-600"
           title={$t('contextMenu.delete')}
           aria-label={$t('contextMenu.delete')}
           onclick={() => {
@@ -4541,7 +4649,8 @@
             }
           }}
         >
-          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14"/></svg>
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0v14a2 2 0 01-2 2H7a2 2 0 01-2-2V6h14"/></svg>
+          <span class="text-[9px] leading-none">{$t('canvasActions.erase')}</span>
         </button>
       </div>
     {/if}
