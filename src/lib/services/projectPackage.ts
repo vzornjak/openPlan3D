@@ -3,12 +3,16 @@ import { readProject } from '$lib/utils/projectValidation';
 import { PACKAGE_LIMIT, jsonBytes, packageJSON, packageError, readPackageZip, writePackageZip, safePackagePath, crc32 } from '$lib/utils/projectPackageZip';
 import { applyNativeEdits, nativeAssetNames, nativeToWeb, validatePackageMapping, validatePackagePlan, webToNative, type PackageMapping } from '$lib/utils/projectPackageBridge';
 import { planStatistics } from '$lib/utils/planStatistics';
+import { buildArchiMd } from '$lib/utils/archiMd';
 import { prepareLibraryRestore } from './libraryRestore';
 import type { DetailKind } from '$lib/models/types';
 import { upgradeLegacyFurnitureCategories } from '$lib/utils/legacyFurnitureCategories';
 
 type PackageState = { version: 1; furnitureCategoriesVersion?: 1; native: Record<string, any>; mapping: PackageMapping; assets: Record<string, string> };
-const docs = ['manifest.json', 'plan.json', 'web.json', 'baseline.json', 'mapping.json'];
+// ARCHI.md is whitelisted here so readProjectPackage() doesn't reject packages
+// that carry it, but it is NEVER parsed back — purely derived, regenerated on
+// every export from the same planStatistics() block, see docs/archi-md-spec.md.
+const docs = ['manifest.json', 'plan.json', 'web.json', 'baseline.json', 'mapping.json', 'ARCHI.md'];
 const reservedAssets = new Set(['plan.json', 'room.json', 'room.usdz', 'session.json', 'manifest.json', 'info.json', 'thumbnail.jpg']);
 function validateLocalImages(project: Project) {
   const images = [...project.floors.flatMap(f => f.backgroundImage ? [f.backgroundImage.dataUrl] : []), ...(project.customEntourage ?? []).map(item => item.dataUrl)];
@@ -64,6 +68,7 @@ export function projectPackageBytes(value: Project): Uint8Array {
   const { plan, mapping } = webToNative(project, state?.native, state?.mapping);
   // Derived on every export; a retained block from an older package is replaced, never carried.
   plan.statistics = planStatistics(project, plan, mapping);
+  const archiMd = buildArchiMd(plan.statistics, { projectName: project.name });
   const planWithoutStatistics = { ...plan }; delete planWithoutStatistics.statistics;
   const assets: Record<string, Uint8Array> = Object.create(null);
   let assetSize = 0;
@@ -101,7 +106,7 @@ export function projectPackageBytes(value: Project): Uint8Array {
     'manifest.json': jsonBytes({ format: 'openplan3d-project', version: 1, producer: 'web', title: project.name }),
     'plan.json': jsonBytes(plan), 'web.json': jsonBytes(project),
     'baseline.json': jsonBytes({ ...planWithoutStatistics, openplanItemDetailsVersion: 1, openplanFurnitureCategoriesVersion: 1, openplanUnderlayFloorId: underlayFloorId, openplanAssetChecksums: Object.fromEntries(Object.entries(assets).map(([path, data]) => [path, crc32(data)])) }),
-    'mapping.json': jsonBytes({ entries: mapping }), ...assets,
+    'mapping.json': jsonBytes({ entries: mapping }), 'ARCHI.md': new TextEncoder().encode(archiMd), ...assets,
   });
 }
 export function readProjectPackage(bytes: Uint8Array): { project: Project; assets: number; warnings: string[] } {
